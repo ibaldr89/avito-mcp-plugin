@@ -98,6 +98,20 @@ def test_block_after_a_transport_error_is_reported_as_block(monkeypatch) -> None
     assert "блокировки IP" in str(exc.value)
 
 
+def test_user_check_page_is_a_block_with_its_own_diagnosis(monkeypatch) -> None:
+    # 439 приходит со страницей проверки вместо каталога: это не успех (иначе
+    # разбор сообщает «nojson») и не бан IP (смена адреса не поможет).
+    client = _client(monkeypatch, [_Resp(439, "pow"), _Resp(439, "pow")], _StaticProxy())
+
+    with pytest.raises(RuntimeError) as exc:
+        client.get(URL)
+
+    message = str(exc.value)
+    assert "проверку пользователя" in message
+    assert "439" in message
+    assert "блокировки IP" not in message
+
+
 def test_no_proxy_with_direct_forbidden_is_a_config_error(monkeypatch) -> None:
     monkeypatch.setenv("AVITO_DIRECT_FIRST", "0")
     with pytest.raises(ValueError, match="AVITO_DIRECT_FIRST"):
