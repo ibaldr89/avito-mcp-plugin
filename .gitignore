@@ -31,3 +31,6 @@ htmlcov/
 
 # Личные оверрайды разрешений/настроек Claude Code
 .claude/settings.local.json
+
+# Список прокси с учётными данными (AVITO_PROXY_FILE)
+proxies.txt
