@@ -12,6 +12,7 @@ HTTP-клиент, куки окажутся привязаны к чужому 
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -51,7 +52,7 @@ class PlaywrightCookiesProvider(CookiesProvider):
         timeout: float = 30.0,
         wait_until: str = "domcontentloaded",
         url: str = _DEFAULT_URL,
-        proxy: str | None = None,
+        proxy: str | Callable[[], str | None] | None = None,
         user_agent: str | None = None,
         locale: str = "ru-RU",
         timezone_id: str = "Europe/Moscow",
@@ -83,7 +84,11 @@ class PlaywrightCookiesProvider(CookiesProvider):
 
     def _harvest(self) -> dict:
         launch_kwargs: dict[str, Any] = {"headless": self._headless}
-        proxy = _proxy_settings(self._proxy)
+        # Прокси берётся в момент сбора, а не при сборке провайдера: выходной
+        # адрес меняется (цепочка транспортов, пул), а куки привязаны к IP, с
+        # которого получены.
+        current = self._proxy() if callable(self._proxy) else self._proxy
+        proxy = _proxy_settings(current)
         if proxy:
             launch_kwargs["proxy"] = proxy
 

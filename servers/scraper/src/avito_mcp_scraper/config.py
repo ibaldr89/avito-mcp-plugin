@@ -73,7 +73,8 @@ def build_http_client(
             os.getenv("AVITO_COOKIE_PROVIDER", DEFAULT_COOKIE_PROVIDER),
             api_key=os.getenv("SPFA_API_KEY"),
             own_cookies=_parse_own_cookies(os.getenv("AVITO_OWN_COOKIES")),
-            proxy=proxy.httpx_proxy(),
+            # Функция, а не значение: см. PlaywrightCookiesProvider._harvest.
+            proxy=proxy.httpx_proxy,
         )
     # 18 попыток при backoff min(9*2^n, 60) — это 903с чистого сна плюс
     # таймауты, то есть тулза упиралась в собственный timeout=900 вместо

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from pathlib import Path
 
@@ -42,6 +43,9 @@ class SpfaCookiesProvider(CookiesProvider):
         self.last_id: str | None = None
         self.last_cookies: dict | None = None
         self._last_buy = 0.0
+        # Провайдер делят потоки (проба пула в check_proxy_health идёт в 8
+        # потоков): без замка каждый, увидев пустой кэш, купил бы куки сам.
+        self._lock = threading.RLock()
         self._load_cache()
         self._headers = {
             "Accept": "application/json",
@@ -49,11 +53,16 @@ class SpfaCookiesProvider(CookiesProvider):
         }
 
     def get(self) -> dict:
-        if self.last_cookies:
-            return self.last_cookies
-        return self._buy()
+        with self._lock:
+            if self.last_cookies:
+                return self.last_cookies
+            return self._buy()
 
     def handle_block(self) -> bool:
+        with self._lock:
+            return self._handle_block()
+
+    def _handle_block(self) -> bool:
         if self.last_id:
             try:
                 resp = httpx.post(

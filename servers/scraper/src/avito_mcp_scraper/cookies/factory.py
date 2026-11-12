@@ -22,7 +22,8 @@ class CookieSettings:
 
     api_key: str | None = None
     own_cookies: dict[str, str] | None = None
-    proxy: str | None = None
+    #: Строка прокси либо функция, отдающая ТЕКУЩИЙ прокси клиента.
+    proxy: str | Callable[[], str | None] | None = None
 
 
 def _build_spfa(settings: CookieSettings) -> CookiesProvider:
@@ -63,7 +64,7 @@ def build_cookies_provider(
     *,
     api_key: str | None,
     own_cookies: dict[str, str] | None,
-    proxy: str | None = None,
+    proxy: str | Callable[[], str | None] | None = None,
 ) -> CookiesProvider | None:
     """Собрать провайдера кук по имени из ``AVITO_COOKIE_PROVIDER``.
 

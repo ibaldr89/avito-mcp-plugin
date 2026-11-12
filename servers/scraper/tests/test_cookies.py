@@ -139,6 +139,11 @@ def test_spfa_persists_cookies_between_processes(monkeypatch, tmp_path) -> None:
     assert len(calls) == 1
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-биты прав в Windows не действуют: chmod меняет только флаг "
+    "«только чтение», доступ к файлу задают ACL профиля пользователя",
+)
 def test_spfa_cache_is_not_world_readable(monkeypatch, tmp_path) -> None:
     # В кэше лежат купленные Qrator-куки: это учётные данные (стоят денег и
     # аутентифицируют запросы к Avito). С правами по умолчанию 0644 их прочёл бы
