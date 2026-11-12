@@ -39,13 +39,15 @@ class FakeStorage:
         self.calls += 1
         now = time.time()
         for row in rows:
+            known = self.items.get(row.id)
+            changed = known is None or known["price"] != row.price
             self.items[row.id] = {
                 "url": row.url,
                 "title": row.title,
                 "price": row.price,
                 "last_seen": now,
             }
-            if row.price is not None:
+            if row.price is not None and changed:
                 self.history.setdefault(row.id, []).insert(0, (float(row.price), now))
 
     def upsert_seen(

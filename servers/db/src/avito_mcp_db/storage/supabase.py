@@ -91,6 +91,15 @@ def _epoch(value: Any) -> float:
     return value.timestamp() if isinstance(value, datetime) else float(value)
 
 
+def _price_changed(previous: dict[int, Any], row: SeenRow) -> bool:
+    """Нужна ли новая точка истории: цена есть и отличается от прошлой."""
+    if row.price is None:
+        # Без цены точка истории бессмысленна.
+        return False
+    last = previous.get(row.id)
+    return last is None or float(last) != float(row.price)
+
+
 class SupabaseStorage:
     """Хранилище в схеме ``avito`` проекта Supabase."""
 
@@ -166,6 +175,17 @@ class SupabaseStorage:
             self._session() as session,
             session.begin(),
         ):
+            # Снимок цен ДО записи, в той же транзакции: точка истории нужна,
+            # только когда цена изменилась. Иначе каждый скан дописывал бы по
+            # строке на объявление, и история пухла бы без единого события.
+            previous = {
+                int(item_id): price
+                for item_id, price in session.execute(
+                    select(SeenItem.id, SeenItem.price).where(
+                        SeenItem.id.in_(list(deduped))
+                    )
+                ).all()
+            }
             session.execute(
                 stmt,
                 [
@@ -178,12 +198,11 @@ class SupabaseStorage:
                     for row in deduped.values()
                 ],
             )
-            # Без цены точка истории бессмысленна.
             session.add_all(
                 [
                     PriceHistory(item_id=row.id, price=row.price)
                     for row in deduped.values()
-                    if row.price is not None
+                    if _price_changed(previous, row)
                 ]
             )
 
