@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from pathlib import Path
 
 from .cookies.factory import build_cookies_provider
 from .http.client import HttpClient
@@ -169,12 +170,37 @@ def page_pause() -> float:
         return 1.0
 
 
+def _proxies_from_file() -> list[str]:
+    """Прокси из файла ``AVITO_PROXY_FILE``: по адресу на строку.
+
+    Пустые строки и строки с ``#`` в начале пропускаются. Файл удобнее
+    переменной, когда адресов десятки и список часто меняется. Нечитаемый
+    файл не роняет парсинг: пишем предупреждение и идём к другим источникам.
+    """
+    raw = os.getenv("AVITO_PROXY_FILE", "").strip()
+    if not raw:
+        return []
+    path = Path(raw).expanduser()
+    try:
+        # utf-8-sig: Блокнот Windows ставит BOM, и он прилип бы к первому адресу.
+        text = path.read_text(encoding="utf-8-sig")
+    except OSError as exc:
+        log.warning("не удалось прочитать AVITO_PROXY_FILE (%s): %s", path, exc)
+        return []
+    lines = (line.strip() for line in text.splitlines())
+    return [line for line in lines if line and not line.startswith("#")]
+
+
 def _proxy_setting() -> str:
-    """Строка прокси: сперва список из кабинета, иначе то, что задано вручную.
+    """Строка прокси: файл, затем список из кабинета, иначе заданное вручную.
 
     ``AVITO_PROXY_LIST_URL`` избавляет от ведения списка портов в env; если
     кабинет недоступен, падаем на ``AVITO_PROXY``, а не остаёмся без прокси.
     """
+    from_file = _proxies_from_file()
+    if from_file:
+        log.info("получено %s прокси из файла", len(from_file))
+        return ",".join(from_file)
     list_url = os.getenv("AVITO_PROXY_LIST_URL", "").strip()
     if list_url:
         with timed("config.proxy_list", logger=log):
