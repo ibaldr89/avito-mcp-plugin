@@ -40,6 +40,14 @@ def build_proxy(
     """
     urls = [part.strip() for part in proxy.split(",") if part.strip()]
     if not urls:
+        if not _direct_first():
+            # Прямое соединение запрещено явно, а прокси нет: молча пойти со
+            # своего адреса значило бы нарушить именно тот запрет, ради
+            # которого переменную выставили.
+            raise ValueError(
+                "прокси не задан, а прямое соединение запрещено "
+                "(AVITO_DIRECT_FIRST=0) — задайте AVITO_PROXY или AVITO_PROXY_FILE"
+            )
         # Прокси не задан — цепочка из одного прямого звена ничего не добавляет.
         return NoProxy()
 
