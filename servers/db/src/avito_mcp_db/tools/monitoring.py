@@ -88,7 +88,10 @@ def register_record(mcp: FastMCP) -> None:
     """Зарегистрировать ``record_scan_result`` (внутренний контракт персистента)."""
 
     @mcp.tool(
-        annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
+        # Не readOnly: тулза пишет в хранилище (dedup, история цены).
+        annotations=ToolAnnotations(
+            readOnlyHint=False, destructiveHint=False, openWorldHint=True
+        ),
         timeout=900,
     )
     async def record_scan_result(

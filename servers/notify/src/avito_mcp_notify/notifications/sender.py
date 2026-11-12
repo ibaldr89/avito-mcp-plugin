@@ -102,7 +102,9 @@ class TelegramNotifier(Notifier):
     ) -> None:
         client.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": target, "text": text, "parse_mode": "HTML"},
+            # Без parse_mode: в тексте — заголовки объявлений, а «<» или «&»
+            # в режиме HTML даёт 400 от Telegram и теряет уведомление целиком.
+            json={"chat_id": target, "text": text},
         ).raise_for_status()
 
 

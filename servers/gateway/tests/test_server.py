@@ -14,7 +14,6 @@ async def test_tool_annotations_match_side_effects() -> None:
         "search_listings",
         "get_listing",
         "check_proxy_health",
-        "scan_new_listings",
         "get_price_history",
     }
     destructive = {"export_listings", "send_notification"}

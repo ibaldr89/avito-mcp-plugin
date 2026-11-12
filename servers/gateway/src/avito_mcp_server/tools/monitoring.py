@@ -22,7 +22,10 @@ def register(mcp: FastMCP) -> None:
     """Зарегистрировать gateway-тулзу ``scan_new_listings`` на инстансе."""
 
     @mcp.tool(
-        annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
+        # Не readOnly: скан пишет в хранилище (dedup, история цены).
+        annotations=ToolAnnotations(
+            readOnlyHint=False, destructiveHint=False, openWorldHint=True
+        ),
         # См. аналогичный комментарий в tools/search.py — тот же движок обхода.
         timeout=900,
     )
