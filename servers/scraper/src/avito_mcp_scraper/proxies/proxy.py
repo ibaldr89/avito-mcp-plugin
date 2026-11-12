@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import logging
-import threading
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
 import httpx
@@ -160,12 +158,8 @@ class ProxyPool(Proxy):
     блокировке ``rotate()`` переключается на следующий адрес; когда круг замкнулся,
     возвращает ``False`` — перебирать больше нечего, нужен свежий пул.
 
-    У адреса может быть своя ссылка смены IP (``change_urls`` — ферма модемов:
-    у каждого модема свой reconnect). Тогда выжженный адрес переподключается
-    В ФОНЕ, пока работа идёт через следующий: смена IP у модема занимает
-    15–17 с, и ждать её на каждой блокировке — значит отдать ей весь бюджет
-    времени. Когда круг замкнулся, пул дожидается фоновых переподключений и,
-    если хоть одно удалось, идёт на второй круг уже с новыми IP.
+    Смена IP у самих адресов — дело провайдера (ферма модемов меняет его по
+    расписанию): пул только перебирает адреса и ничего не переподключает.
     """
 
     def __init__(
@@ -173,26 +167,14 @@ class ProxyPool(Proxy):
         urls: list[str],
         cooldown_store: ProxyCooldownStore | None = None,
         cooldown: float = 1800.0,
-        change_urls: Sequence[str | None] | None = None,
-        change_timeout: float = 30.0,
     ) -> None:
         if not urls:
             raise ValueError("пул прокси пуст")
-        if change_urls is not None and len(change_urls) != len(urls):
-            raise ValueError("ссылок смены IP должно быть столько же, сколько прокси")
         self.urls = urls
-        self.change_urls: list[str | None] = (
-            list(change_urls) if change_urls is not None else [None] * len(urls)
-        )
-        self.change_timeout = change_timeout
         self.cooldown_store = cooldown_store
         self.cooldown = cooldown
         self._index = 0
         self._rotations = 0
-        # Фоновые переподключения: индекс адреса → (поток, ячейка результата).
-        # Словарём владеет поток, работающий с пулом; рабочий поток пишет
-        # только в свою ячейку, которую читают после join().
-        self._reconnects: dict[int, tuple[threading.Thread, list[bool]]] = {}
         self._skip_cooled_down()
 
     def _blocked(self) -> set[str]:
@@ -222,9 +204,7 @@ class ProxyPool(Proxy):
 
     def _remember_block(self, index: int) -> None:
         """Запомнить выжженный адрес между запусками (если есть чем)."""
-        if self.cooldown_store is None or self.change_urls[index]:
-            # Адрес со своей ссылкой смены IP выйдет из переподключения уже с
-            # другим IP — держать его в cooldown полчаса незачем.
+        if self.cooldown_store is None:
             return
         try:
             # В базу — БЕЗ учётных данных: пароль прокси не должен уезжать
@@ -233,51 +213,17 @@ class ProxyPool(Proxy):
         except Exception as exc:  # noqa: BLE001
             log.warning("не удалось запомнить блокировку прокси: %s", exc)
 
-    def _start_reconnect(self, index: int) -> None:
-        """Запустить смену IP выжженного адреса в фоне (если у него есть ссылка)."""
-        change_url = self.change_urls[index]
-        if not change_url:
-            return
-        running = self._reconnects.get(index)
-        if running is not None and running[0].is_alive():
-            return
-        outcome: list[bool] = []
-
-        def _run() -> None:
-            outcome.append(change_ip(change_url, self.change_timeout))
-
-        # daemon: незавершённое переподключение не должно держать процесс.
-        thread = threading.Thread(target=_run, name=f"reconnect-{index}", daemon=True)
-        self._reconnects[index] = (thread, outcome)
-        thread.start()
-
-    def _await_reconnects(self) -> bool:
-        """Дождаться фоновых переподключений. ``True`` — хоть одно удалось."""
-        pending, self._reconnects = self._reconnects, {}
-        succeeded = False
-        for thread, outcome in pending.values():
-            # Запас сверх таймаута запроса: поток обязан завершиться сам.
-            thread.join(self.change_timeout + 5.0)
-            succeeded = succeeded or (bool(outcome) and outcome[0])
-        return succeeded
-
     def rotate(self) -> bool:
         # rotate() вызывается именно после блокировки — помечаем текущий адрес,
         # чтобы следующий запуск не тратил на него попытки.
-        burned = self._index
-        self._remember_block(burned)
-        self._start_reconnect(burned)
+        self._remember_block(self._index)
         self._index = (self._index + 1) % len(self.urls)
         self._rotations += 1
         self._skip_cooled_down()
-        if self._rotations % len(self.urls) != 0:
-            # Другой адрес пула — сразу другой выходной IP: пауза не нужна.
-            self.rotation_was_instant = True
-            return True
-        self.rotation_was_instant = False
-        # Круг замкнулся: продолжать есть смысл, только если адреса успели
-        # сменить IP. Без ссылок смены это прежнее «прокси кончились».
-        return self._await_reconnects()
+        # Другой адрес пула — сразу другой выходной IP: пауза не нужна. Круг
+        # замкнулся — прокси кончились, вызывающему нужен сигнал.
+        self.rotation_was_instant = self._rotations % len(self.urls) != 0
+        return self.rotation_was_instant
 
 
 class ChainProxy(Proxy):

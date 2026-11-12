@@ -38,13 +38,13 @@ def build_proxy(
     ``mps_api_token``/``mps_proxy_id``), один без него → ``ServerProxy``,
     пусто → ``NoProxy``.
     """
-    entries = [split_entry(part) for part in proxy.split(",") if part.strip()]
-    if not entries:
+    urls = [part.strip() for part in proxy.split(",") if part.strip()]
+    if not urls:
         # Прокси не задан — цепочка из одного прямого звена ничего не добавляет.
         return NoProxy()
 
     configured = _build_configured(
-        entries, change_url, cooldown_store, mps_api_token, mps_proxy_id, mps_operator
+        urls, change_url, cooldown_store, mps_api_token, mps_proxy_id, mps_operator
     )
     if not _direct_first():
         return configured
@@ -54,18 +54,8 @@ def build_proxy(
     return ChainProxy([NoProxy(), configured])
 
 
-def split_entry(raw: str) -> tuple[str, str | None]:
-    """Разобрать элемент ``AVITO_PROXY``: ``прокси`` либо ``прокси|ссылка_смены_IP``.
-
-    Вторая форма нужна ферме модемов: у каждого модема своя ссылка
-    переподключения, и одной общей ``AVITO_PROXY_CHANGE_URL`` на пул мало.
-    """
-    url, _, change = raw.strip().partition("|")
-    return url.strip(), (change.strip() or None)
-
-
 def _build_configured(
-    entries: list[tuple[str, str | None]],
+    urls: list[str],
     change_url: str,
     cooldown_store: ProxyCooldownStore | None,
     mps_api_token: str,
@@ -73,15 +63,8 @@ def _build_configured(
     mps_operator: str,
 ) -> Proxy:
     """Собрать тот прокси, который описан настройками, без прямого звена."""
-    urls = [url for url, _ in entries]
     if len(urls) > 1:
-        return ProxyPool(
-            urls,
-            cooldown_store=cooldown_store,
-            change_urls=[change for _, change in entries],
-        )
-    # Своя ссылка адреса важнее общей AVITO_PROXY_CHANGE_URL.
-    change_url = entries[0][1] or change_url
+        return ProxyPool(urls, cooldown_store=cooldown_store)
     if change_url:
         if mps_api_token and mps_proxy_id:
             return MpsApiProxy(
