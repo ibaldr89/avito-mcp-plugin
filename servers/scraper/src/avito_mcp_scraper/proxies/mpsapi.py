@@ -15,7 +15,7 @@ import logging
 
 import httpx
 
-from .proxy import MobileProxy
+from .proxy import MobileProxy, reports_failure
 
 log = logging.getLogger(__name__)
 
@@ -124,6 +124,11 @@ class MpsApiProxy(MobileProxy):
         self._tried_geoids.add(geoid)
         if resp.status_code != 200:
             log.warning("смена оборудования вернула статус %s", resp.status_code)
+            return False
+        if reports_failure(resp):
+            # API отвечает 200 и на отказ — без этого «эскалировали» бы в никуда
+            # и тратили второй круг попыток на той же прожжённой точке.
+            log.warning("смена оборудования отклонена (status в теле ответа)")
             return False
         log.warning("прокси эскалирован на новую точку geoid=%s", geoid)
         return True

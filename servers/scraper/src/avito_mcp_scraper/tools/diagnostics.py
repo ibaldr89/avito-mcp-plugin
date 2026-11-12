@@ -15,7 +15,7 @@ from ..http.client import HttpClient, fetch_catalog
 from ..models import ProxyHealth, ProxyProbe
 from ..parser import PageKind, explain_status
 from ..progress import report
-from ..proxies.proxy import ProxyPool, ServerProxy
+from ..proxies.proxy import Proxy, ProxyPool, ServerProxy
 from ..timing import current_timings, track
 from ..utils import mask_proxy
 from .execution import run_blocking
@@ -96,6 +96,21 @@ def probe_pool(
     return probes
 
 
+def find_pool(proxy: Proxy) -> ProxyPool | None:
+    """Пул адресов в собранном прокси — сам по себе или звеном цепочки.
+
+    По умолчанию фабрика оборачивает настроенный прокси в
+    ``ChainProxy([NoProxy(), …])``: без заглядывания в звенья диагностика
+    проверяла бы прямое соединение и молчала о пуле.
+    """
+    if isinstance(proxy, ProxyPool):
+        return proxy
+    for link in getattr(proxy, "links", ()):
+        if isinstance(link, ProxyPool):
+            return link
+    return None
+
+
 def register(mcp: FastMCP) -> None:
     """Зарегистрировать диагностическую тулзу на инстансе FastMCP."""
 
@@ -143,7 +158,7 @@ def register(mcp: FastMCP) -> None:
             )
             probes: list[ProxyProbe] = []
 
-            pool = client.proxy if isinstance(client.proxy, ProxyPool) else None
+            pool = find_pool(client.proxy)
             if pool is not None:
                 # С пулом важен не общий вердикт, а какие именно адреса живы.
                 probes = probe_pool(pool.urls, client.cookies, probe_url, _probe)

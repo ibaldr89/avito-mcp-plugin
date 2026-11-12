@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import threading
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
 import httpx
@@ -29,6 +31,62 @@ class ProxyCooldownStore(Protocol):
     def blocked_proxies(self, ttl: float) -> set[str]:
         """Адреса, заблокированные не позже ``ttl`` секунд назад."""
         ...
+
+
+#: Значения поля ``status`` в JSON-ответе кабинета, означающие отказ. Кабинеты
+#: мобильных прокси отвечают HTTP 200 и на отказ (``{"status": "fail", …}``) —
+#: по одному коду статуса его не видно.
+_FAILURE_STATUSES = frozenset({"fail", "failed", "err", "error"})
+
+
+def with_scheme(url: str) -> str:
+    """Достроить ``host:port`` до URL прокси; явную схему (socks5://…) не трогаем."""
+    return url if "://" in url else f"http://{url}"
+
+
+def reports_failure(resp: object) -> bool:
+    """Тело ответа кабинета явно сообщает об отказе (``status: fail``)?
+
+    Не-JSON и JSON без поля ``status`` отказом не считаются: формат у
+    провайдеров разный, и требовать ``status: ok`` значило бы сломать тех,
+    кто отдаёт просто новый IP.
+    """
+    try:
+        payload = resp.json()  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 — тело не JSON, судить не по чему
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return str(payload.get("status", "")).strip().lower() in _FAILURE_STATUSES
+
+
+def change_ip(change_url: str, timeout: float) -> bool:
+    """Дёрнуть ссылку смены IP. ``True`` — кабинет подтвердил смену."""
+    try:
+        # Параметр клеим через URL, а не строкой: change_url может уже
+        # иметь или не иметь query. trust_env=False — служебный запрос к
+        # кабинету не должен уходить через HTTPS_PROXY из шелла (то есть
+        # через сам ротируемый прокси). Построение URL — внутри try:
+        # httpx.InvalidURL (опечатка/битый порт в change_url) не наследует
+        # HTTPError (проверено в httpx 0.28.1) и иначе пробросился бы сырым
+        # исключением вместо контрактного False.
+        url = httpx.URL(change_url).copy_merge_params({"format": "json"})
+        resp = httpx.get(
+            url,
+            timeout=timeout,
+            trust_env=False,
+            follow_redirects=True,
+        )
+    except (httpx.HTTPError, httpx.InvalidURL) as exc:
+        log.warning("ротация IP не удалась: %s", exc)
+        return False
+    if resp.status_code != 200:
+        log.warning("ротация IP вернула статус %s", resp.status_code)
+        return False
+    if reports_failure(resp):
+        log.warning("кабинет отказал в смене IP (status=fail в теле ответа)")
+        return False
+    return True
 
 
 class Proxy(ABC):
@@ -74,7 +132,7 @@ class ServerProxy(Proxy):
         self.url = url
 
     def httpx_proxy(self) -> str | None:
-        return f"http://{self.url}"
+        return with_scheme(self.url)
 
     def rotate(self) -> bool:
         return False
@@ -89,31 +147,10 @@ class MobileProxy(Proxy):
         self.timeout = timeout
 
     def httpx_proxy(self) -> str | None:
-        return f"http://{self.url}"
+        return with_scheme(self.url)
 
     def rotate(self) -> bool:
-        try:
-            # Параметр клеим через URL, а не строкой: change_url может уже
-            # иметь или не иметь query. trust_env=False — служебный запрос к
-            # кабинету не должен уходить через HTTPS_PROXY из шелла (то есть
-            # через сам ротируемый прокси). Построение URL — внутри try:
-            # httpx.InvalidURL (опечатка/битый порт в change_url) не наследует
-            # HTTPError (проверено в httpx 0.28.1) и иначе пробросился бы сырым
-            # исключением вместо контрактного False.
-            url = httpx.URL(self.change_url).copy_merge_params({"format": "json"})
-            resp = httpx.get(
-                url,
-                timeout=self.timeout,
-                trust_env=False,
-                follow_redirects=True,
-            )
-        except (httpx.HTTPError, httpx.InvalidURL) as exc:
-            log.warning("ротация IP не удалась: %s", exc)
-            return False
-        if resp.status_code != 200:
-            log.warning("ротация IP вернула статус %s", resp.status_code)
-            return False
-        return True
+        return change_ip(self.change_url, self.timeout)
 
 
 class ProxyPool(Proxy):
@@ -122,6 +159,13 @@ class ProxyPool(Proxy):
     Пул выходных IP смешанный: часть адресов прожжена Qrator, часть чиста. При
     блокировке ``rotate()`` переключается на следующий адрес; когда круг замкнулся,
     возвращает ``False`` — перебирать больше нечего, нужен свежий пул.
+
+    У адреса может быть своя ссылка смены IP (``change_urls`` — ферма модемов:
+    у каждого модема свой reconnect). Тогда выжженный адрес переподключается
+    В ФОНЕ, пока работа идёт через следующий: смена IP у модема занимает
+    15–17 с, и ждать её на каждой блокировке — значит отдать ей весь бюджет
+    времени. Когда круг замкнулся, пул дожидается фоновых переподключений и,
+    если хоть одно удалось, идёт на второй круг уже с новыми IP.
     """
 
     def __init__(
@@ -129,14 +173,26 @@ class ProxyPool(Proxy):
         urls: list[str],
         cooldown_store: ProxyCooldownStore | None = None,
         cooldown: float = 1800.0,
+        change_urls: Sequence[str | None] | None = None,
+        change_timeout: float = 30.0,
     ) -> None:
         if not urls:
             raise ValueError("пул прокси пуст")
+        if change_urls is not None and len(change_urls) != len(urls):
+            raise ValueError("ссылок смены IP должно быть столько же, сколько прокси")
         self.urls = urls
+        self.change_urls: list[str | None] = (
+            list(change_urls) if change_urls is not None else [None] * len(urls)
+        )
+        self.change_timeout = change_timeout
         self.cooldown_store = cooldown_store
         self.cooldown = cooldown
         self._index = 0
         self._rotations = 0
+        # Фоновые переподключения: индекс адреса → (поток, ячейка результата).
+        # Словарём владеет поток, работающий с пулом; рабочий поток пишет
+        # только в свою ячейку, которую читают после join().
+        self._reconnects: dict[int, tuple[threading.Thread, list[bool]]] = {}
         self._skip_cooled_down()
 
     def _blocked(self) -> set[str]:
@@ -162,24 +218,66 @@ class ProxyPool(Proxy):
                 return
 
     def httpx_proxy(self) -> str | None:
-        return f"http://{self.urls[self._index]}"
+        return with_scheme(self.urls[self._index])
+
+    def _remember_block(self, index: int) -> None:
+        """Запомнить выжженный адрес между запусками (если есть чем)."""
+        if self.cooldown_store is None or self.change_urls[index]:
+            # Адрес со своей ссылкой смены IP выйдет из переподключения уже с
+            # другим IP — держать его в cooldown полчаса незачем.
+            return
+        try:
+            # В базу — БЕЗ учётных данных: пароль прокси не должен уезжать
+            # в облачный Postgres. Ключ cooldown — host:port.
+            self.cooldown_store.mark_proxy_blocked(mask_proxy(self.urls[index]))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("не удалось запомнить блокировку прокси: %s", exc)
+
+    def _start_reconnect(self, index: int) -> None:
+        """Запустить смену IP выжженного адреса в фоне (если у него есть ссылка)."""
+        change_url = self.change_urls[index]
+        if not change_url:
+            return
+        running = self._reconnects.get(index)
+        if running is not None and running[0].is_alive():
+            return
+        outcome: list[bool] = []
+
+        def _run() -> None:
+            outcome.append(change_ip(change_url, self.change_timeout))
+
+        # daemon: незавершённое переподключение не должно держать процесс.
+        thread = threading.Thread(target=_run, name=f"reconnect-{index}", daemon=True)
+        self._reconnects[index] = (thread, outcome)
+        thread.start()
+
+    def _await_reconnects(self) -> bool:
+        """Дождаться фоновых переподключений. ``True`` — хоть одно удалось."""
+        pending, self._reconnects = self._reconnects, {}
+        succeeded = False
+        for thread, outcome in pending.values():
+            # Запас сверх таймаута запроса: поток обязан завершиться сам.
+            thread.join(self.change_timeout + 5.0)
+            succeeded = succeeded or (bool(outcome) and outcome[0])
+        return succeeded
 
     def rotate(self) -> bool:
         # rotate() вызывается именно после блокировки — помечаем текущий адрес,
         # чтобы следующий запуск не тратил на него попытки.
-        if self.cooldown_store is not None:
-            try:
-                # В базу — БЕЗ учётных данных: пароль прокси не должен уезжать
-                # в облачный Postgres. Ключ cooldown — host:port.
-                self.cooldown_store.mark_proxy_blocked(
-                    mask_proxy(self.urls[self._index])
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.warning("не удалось запомнить блокировку прокси: %s", exc)
+        burned = self._index
+        self._remember_block(burned)
+        self._start_reconnect(burned)
         self._index = (self._index + 1) % len(self.urls)
         self._rotations += 1
         self._skip_cooled_down()
-        return self._rotations % len(self.urls) != 0
+        if self._rotations % len(self.urls) != 0:
+            # Другой адрес пула — сразу другой выходной IP: пауза не нужна.
+            self.rotation_was_instant = True
+            return True
+        self.rotation_was_instant = False
+        # Круг замкнулся: продолжать есть смысл, только если адреса успели
+        # сменить IP. Без ссылок смены это прежнее «прокси кончились».
+        return self._await_reconnects()
 
 
 class ChainProxy(Proxy):
@@ -223,8 +321,12 @@ class ChainProxy(Proxy):
             )
             return True
         # Звенья кончились — остаётся дорогая смена IP внутри последнего.
-        self.rotation_was_instant = False
-        return self.links[-1].rotate()
+        last = self.links[-1]
+        rotated = last.rotate()
+        # Последнее звено само знает, была ли смена мгновенной (пул адресов
+        # переключается без похода в кабинет).
+        self.rotation_was_instant = rotated and last.rotation_was_instant
+        return rotated
 
     def escalate(self) -> bool:
         """Эскалация касается только последнего звена — у прямого её нет."""
