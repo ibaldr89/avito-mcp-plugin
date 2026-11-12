@@ -21,7 +21,7 @@ from ..cookies.base import CookiesProvider
 from ..parser import PageKind, PageResult, classify, explain_status
 from ..proxies.proxy import Proxy
 from ..timing import timed
-from ..utils import mask_proxy, to_absolute_avito_url
+from ..utils import mask_proxy, require_avito_url, to_absolute_avito_url
 
 # Только алиасы, следующие за свежими версиями браузеров. "edge" исключён:
 # curl_cffi резолвит его в edge101 — отпечаток 2022 года, заметный антиботу.
@@ -141,6 +141,24 @@ class HttpClient:
         if session is not None:
             with suppress(Exception):
                 session.close()
+
+    def heal_soft_block(self) -> bool:
+        """Сменить выходной адрес после блокировки, пришедшей с кодом 200.
+
+        Капча «проблема с IP» и пустой каталог приходят как обычный 200 — цикл
+        попыток в ``get()`` их не видит, он судит по коду статуса. ``True`` —
+        адрес сменён, запрос стоит повторить. Куки здесь не покупаются:
+        диагностика (``check_proxy_health``) ходит тем же путём и не должна
+        тратить деньги на каждую пробу.
+        """
+        if self._out_of_budget():
+            return False
+        with timed("proxy.rotate", logger=log):
+            rotated = self.proxy.rotate()
+        if rotated:
+            # Соединение осталось бы на прежнем выходном IP — см. _drop_session.
+            self._drop_session()
+        return rotated
 
     def close(self) -> None:
         """Освободить соединение. Идемпотентна — тулзы зовут её в ``finally``."""
@@ -373,6 +391,11 @@ class HttpClient:
 # fetch_catalog возвращается на исходный URL за свежим токеном.
 _REDIRECT_HOP_ATTEMPTS = 5
 
+#: Сколько раз менять выходной адрес из-за блокировки с кодом 200 (капча,
+#: пустой каталог). Немного: каждая смена — новый проход редирект-цепочки.
+_SOFT_BLOCK_HEALS = 2
+_SOFT_BLOCKS = (PageKind.FIREWALL, PageKind.SOFTBLOCK)
+
 
 def fetch_catalog(
     client: HttpClient,
@@ -431,11 +454,12 @@ def _follow(
     ответ (нужен вызывающим, которые разбирают HTML сами, а не каталог).
     При исчерпании бюджета — ``(REDIRECT_LOOP, None, None)``.
     """
-    origin_url = url
-    current_url = url
+    origin_url = require_avito_url(url)
+    current_url = origin_url
     on_redirect_hop = False
     redirects_followed = 0
     refreshes_used = 0
+    soft_heals = 0
     while True:
         try:
             resp = client.get(
@@ -467,7 +491,22 @@ def _follow(
             redirects_followed += 1
             if redirects_followed > max_redirects:
                 return PageKind.REDIRECT_LOOP, None, None
-            current_url = to_absolute_avito_url(payload)
+            # Цель редиректа приходит со страницы — чужой ввод, как и исходный URL.
+            current_url = require_avito_url(to_absolute_avito_url(payload))
             on_redirect_hop = True
             continue
+        if kind in _SOFT_BLOCKS and soft_heals < _SOFT_BLOCK_HEALS:
+            # getattr: вызывающие подставляют свои клиенты (диагностика, тесты),
+            # и умение менять адрес — не часть их обязательного контракта.
+            heal = getattr(client, "heal_soft_block", None)
+            if heal is not None and heal():
+                soft_heals += 1
+                log.warning(
+                    "блокировка с кодом 200 (%s) — сменил выходной адрес, повторяю",
+                    kind,
+                )
+                current_url = origin_url
+                on_redirect_hop = False
+                redirects_followed = 0
+                continue
         return kind, payload, resp

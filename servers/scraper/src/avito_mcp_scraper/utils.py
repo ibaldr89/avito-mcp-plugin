@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 
 def extract_listing_id(value: str) -> int:
     """Извлечь числовой id объявления Avito из URL или «голого» id.
@@ -37,6 +39,24 @@ def mask_proxy(url: str) -> str:
 def is_absolute_url(value: str) -> bool:
     """Строка уже является абсолютным http(s)-URL?"""
     return value.startswith(("http://", "https://"))
+
+
+def require_avito_url(url: str) -> str:
+    """Вернуть URL, если он ведёт на avito.ru; иначе — ошибка.
+
+    Адрес приходит от модели (а редирект — со страницы), то есть это чужой
+    ввод: без проверки тулза пошла бы на любой хост, включая внутренние, и
+    понесла бы туда куки сессии.
+
+    Raises:
+        ValueError: схема не http(s) либо хост вне avito.ru.
+    """
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    on_avito = host == "avito.ru" or host.endswith(".avito.ru")
+    if parts.scheme not in ("http", "https") or not on_avito:
+        raise ValueError(f"адрес вне avito.ru не запрашиваю: {url!r}")
+    return url
 
 
 def to_listing_url(id_or_url: str) -> str:
