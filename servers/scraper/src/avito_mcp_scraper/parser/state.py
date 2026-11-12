@@ -57,7 +57,7 @@ _FIREWALL_MARKERS = ("firewall-container", "js-firewall-form", "firewallCaptcha"
 _STATUS_HINTS: dict[str, str] = {
     PageKind.FIREWALL: (
         "Avito заблокировал IP (страница «проблема с IP» с капчей). Капчу не решаем: "
-        "нужен чистый RU-прокси — задайте AVITO_PROXY и AVITO_PROXY_CHANGE_URL"
+        "нужен чистый RU-прокси — добавьте адреса в AVITO_PROXY или AVITO_PROXY_FILE"
     ),
     PageKind.SOFTBLOCK: (
         "страница отдалась без каталога (поведенческий флаг) — обычно помогает "

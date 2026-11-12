@@ -101,6 +101,10 @@ class HttpClient:
         # памяти об этом КАЖДАЯ следующая страница снова начиналась бы с них —
         # лишний 403 и потраченная попытка на страницу.
         self._skip_cookies = False
+        # Чем кончилась последняя неудачная попытка: текст транспортной ошибки
+        # либо None, если это был код блокировки. По нему отказ называет
+        # настоящую причину — «прокси не отвечает» лечится иначе, чем бан IP.
+        self._transport_failure: str | None = None
 
     def _remaining(self) -> float:
         """Сколько секунд бюджета осталось (``inf``, если бюджета нет)."""
@@ -202,18 +206,34 @@ class HttpClient:
                 "региона/оператора) и пробую заново",
                 limit,
             )
-        via = "прокси не задан" if self.proxy.httpx_proxy() is None else "через прокси"
+        cause, advice = self._diagnosis()
         if self._out_of_budget():
             raise RuntimeError(
                 f"не удалось получить {url}: исчерпан бюджет времени "
-                f"{self.budget:.0f}с за {attempt} попыток (блокировки IP, {via}). "
-                "Увеличьте AVITO_REQUEST_BUDGET либо дайте чистый RU-прокси "
-                "(AVITO_PROXY, AVITO_PROXY_CHANGE_URL)"
+                f"{self.budget:.0f}с за {attempt} попыток ({cause}). "
+                f"Увеличьте AVITO_REQUEST_BUDGET. {advice}"
             )
         raise RuntimeError(
             f"не удалось получить {url} за {attempt} из {limit} попыток "
-            f"(блокировки IP, {via}). Нужен чистый RU-прокси: "
-            "задайте AVITO_PROXY и AVITO_PROXY_CHANGE_URL"
+            f"({cause}). {advice}"
+        )
+
+    def _diagnosis(self) -> tuple[str, str]:
+        """Причина отказа и что с ней делать — по последней неудачной попытке."""
+        proxied = self.proxy.httpx_proxy() is not None
+        via = "через прокси" if proxied else "прокси не задан"
+        if self._transport_failure is not None:
+            advice = (
+                "Проверьте, что прокси доступен и принимает логин/пароль "
+                "(AVITO_PROXY, AVITO_PROXY_FILE)"
+                if proxied
+                else "Проверьте сетевое соединение"
+            )
+            return f"сбой соединения, {via}: {self._transport_failure}", advice
+        return (
+            f"блокировки IP, {via}",
+            "Нужен чистый RU-прокси: добавьте адреса в AVITO_PROXY или "
+            "AVITO_PROXY_FILE",
         )
 
     def _attempt_get(self, url: str, limit: int) -> tuple[Any | None, int]:
@@ -258,6 +278,7 @@ class HttpClient:
                     # под общий "нужен чистый RU-прокси".
                     raise
                 log.warning("транспортная ошибка (%s) — ротирую IP", exc)
+                self._transport_failure = str(exc) or type(exc).__name__
                 # Здесь, в отличие от блокировки, цикл НЕ обрывается при
                 # rotated=False: таймаут/обрыв TCP лечится повтором, а не
                 # сменой IP, и без прокси (rotate() всегда False) отказ с
@@ -265,6 +286,8 @@ class HttpClient:
                 blocks, _ = self._rotate_and_backoff(attempt, limit, blocks)
                 continue
             log.info("ответ %s на попытке %s", resp.status_code, attempt)
+            # Ответ пришёл — соединение живо; дальнейший отказ уже не про сеть.
+            self._transport_failure = None
             if self.cookies:
                 self.cookies.update(resp)
             if resp.status_code in self.block_codes:
